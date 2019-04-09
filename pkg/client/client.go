@@ -8,61 +8,73 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 
 	"github.com/alexellis/inlets/pkg/transport"
+
 	"github.com/gorilla/websocket"
-	"github.com/pkg/errors"
+)
+
+const (
+	IDHeader      = "x-client-id"
+	SubjectHeader = "x-client-subject"
 )
 
 var httpClient *http.Client
 
+func New(cfg *Configuration) *Client {
+	return &Client{
+		cfg:  cfg,
+		stop: make(chan struct{}),
+	}
+}
+
 // Client for inlets
 type Client struct {
-	// Remote site for websocket address
-	Remote string
+	cfg *Configuration
 
-	// Map of upstream servers dns.entry=http://ip:port
-	UpstreamMap map[string]string
-
-	// Token for authentication
-	Token string
-
-	// PingWaitDuration duration to wait between pings
-	PingWaitDuration time.Duration
+	stop chan struct{}
 }
 
 // Connect connect and serve traffic through websocket
-func (c *Client) Connect() error {
+func (c *Client) Serve() {
 
 	httpClient = http.DefaultClient
 	httpClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
 
-	remote := c.Remote
-	if !strings.HasPrefix(remote, "ws") {
-		remote = "ws://" + remote
-	}
-
-	remoteURL, urlErr := url.Parse(remote)
+	remoteURL, urlErr := url.Parse(c.cfg.Remote)
 	if urlErr != nil {
-		return errors.Wrap(urlErr, "bad remote URL")
+		log.Printf("bad remote URL %s ERR:%s", remoteURL, urlErr)
+		return
 	}
 
 	u := url.URL{Scheme: remoteURL.Scheme, Host: remoteURL.Host, Path: "/tunnel"}
 
-	log.Printf("connecting to %s with ping=%s", u.String(), c.PingWaitDuration.String())
-
-	wsc, _, err := websocket.DefaultDialer.Dial(u.String(), http.Header{
-		"Authorization": []string{"Bearer " + c.Token},
+	log.Printf("connecting to %s with ping=%s", u.String(), c.cfg.PingWaitDuration.String())
+	dialer := &websocket.Dialer{
+		ReadBufferSize:   2048,
+		WriteBufferSize:  2048,
+		HandshakeTimeout: 45 * time.Second,
+		TLSClientConfig:  c.cfg.TLSConfig,
+	}
+	wsc, _, err := dialer.Dial(u.String(), http.Header{
+		IDHeader:        []string{c.cfg.ID},
+		SubjectHeader:   []string{c.cfg.Subject},
+		"Authorization": []string{"Bearer " + c.cfg.Token},
 	})
-
-	ws := transport.NewWebsocketConn(wsc, c.PingWaitDuration)
+	if err != nil {
+		log.Printf("dial server %s ERR:%s", u.String(), err)
+		return
+	}
+	ws := transport.NewWebsocketConn(wsc, c.cfg.PingWaitDuration)
 
 	if err != nil {
-		return err
+		log.Printf("new websocket conn ERR:%s", err)
+		return
 	}
 
 	log.Printf("Connected to websocket: %s", ws.LocalAddr())
@@ -75,7 +87,7 @@ func (c *Client) Connect() error {
 	go func() {
 		log.Printf("Writing pings")
 
-		ticker := time.NewTicker((c.PingWaitDuration * 9) / 10) // send on a period which is around 9/10ths of original value
+		ticker := time.NewTicker((c.cfg.PingWaitDuration * 9) / 10) // send on a period which is around 9/10ths of original value
 		for {
 			select {
 			case <-ticker.C:
@@ -121,27 +133,30 @@ func (c *Client) Connect() error {
 				}
 
 				inletsID := req.Header.Get(transport.InletsHeader)
-				// log.Printf("[%s] recv: %d", requestID, len(message))
 
 				log.Printf("[%s] %s", inletsID, req.RequestURI)
 
 				body, _ := ioutil.ReadAll(req.Body)
 
 				proxyHost := ""
-				if val, ok := c.UpstreamMap[req.Host]; ok {
+				if val, ok := c.cfg.UpstreamMap[req.Host]; ok {
 					proxyHost = val
-				} else if val, ok := c.UpstreamMap[""]; ok {
+				} else if val, ok := c.cfg.UpstreamMap[""]; ok {
 					proxyHost = val
 				}
 
-				requestURI := fmt.Sprintf("%s%s", proxyHost, req.URL.String())
-				if len(req.URL.RawQuery) > 0 {
-					requestURI = requestURI + "?" + req.URL.RawQuery
+				targetURL, paseHostErr := url.Parse(proxyHost)
+				if paseHostErr != nil {
+					log.Printf("[%s] pase upstream target host err: %s", inletsID, paseHostErr)
+					return
 				}
 
-				log.Printf("[%s] proxy => %s", inletsID, requestURI)
+				targetURL.Path = path.Join(targetURL.Path, req.URL.Path)
+				targetURL.RawQuery = req.URL.RawQuery
 
-				newReq, newReqErr := http.NewRequest(req.Method, requestURI, bytes.NewReader(body))
+				log.Printf("[%s] proxy => %s", inletsID, targetURL.String())
+
+				newReq, newReqErr := http.NewRequest(req.Method, targetURL.String(), bytes.NewReader(body))
 				if newReqErr != nil {
 					log.Printf("[%s] newReqErr: %s", inletsID, newReqErr.Error())
 					return
@@ -190,6 +205,9 @@ func (c *Client) Connect() error {
 	}()
 
 	<-done
+}
 
-	return nil
+func (c *Client) Stop() {
+	//TODO gracefull shutdown
+	close(c.stop)
 }
