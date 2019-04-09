@@ -4,9 +4,10 @@ import (
 	"log"
 
 	"github.com/alexellis/inlets/pkg/server"
+	"time"
+
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
-	"time"
 )
 
 func init() {
@@ -55,16 +56,18 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	}
 	log.Printf("Gateway timeout: %f secs\n", gatewayTimeout.Seconds())
 
-	port, err := cmd.Flags().GetInt("port")
+	addr, err := cmd.Flags().GetString("addr")
 	if err != nil {
 		return errors.Wrap(err, "failed to get the 'port' value.")
 	}
 
-	inletsServer := server.Server{
-		Port:           port,
+	cfg := &server.Configuration{
+		Addr:           addr,
 		GatewayTimeout: gatewayTimeout,
 		Token:          token,
 	}
+
+	inletsServer := server.New(cfg)
 
 	inletsServer.Serve()
 	return nil
