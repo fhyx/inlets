@@ -3,25 +3,47 @@ package server
 import (
 	"bufio"
 	"bytes"
+	"crypto/tls"
+	"expvar"
 	"fmt"
 	"io/ioutil"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/alexellis/inlets/pkg/transport"
-	"github.com/alexellis/inlets/pkg/types"
+	"fhyx/inlets/pkg/client"
+	"fhyx/inlets/pkg/transport"
+	"fhyx/inlets/pkg/types"
+
 	"github.com/gorilla/websocket"
 	"github.com/twinj/uuid"
 )
 
+var (
+	count = expvar.NewInt("count")
+	guids = expvar.NewMap("guids")
+)
+
+func New(cfg *Configuration) *Server {
+	return &Server{
+		cfg:  cfg,
+		stop: make(chan struct{}),
+	}
+}
+
 // Server for the exit-node of inlets
 type Server struct {
-	GatewayTimeout time.Duration
-	Port           int
-	Token          string
+	cfg *Configuration
+
+	notifs struct {
+		sync.RWMutex
+		m map[Notifiee]struct{}
+	}
+
+	stop chan struct{}
 }
 
 // Serve traffic
@@ -30,15 +52,69 @@ func (s *Server) Serve() {
 
 	outgoingBus := types.NewRequestBus()
 
-	http.HandleFunc("/", proxyHandler(outgoingBus, bus, s.GatewayTimeout))
-	http.HandleFunc("/tunnel", serveWs(outgoingBus, bus, s.Token))
+	router := http.NewServeMux()
+	router.Handle("/debug/vars", expvar.Handler())
+	router.HandleFunc("/", proxyHandler(outgoingBus, bus, s.cfg.GatewayTimeout))
+	router.HandleFunc("/tunnel", s.serveWs(outgoingBus, bus))
+
+	svr := http.Server{
+		Handler: router,
+		Addr:    s.cfg.Addr,
+	}
 
 	collectInterval := time.Second * 10
-	go garbageCollectBus(bus, collectInterval, s.GatewayTimeout*2)
+	go garbageCollectBus(bus, collectInterval, s.cfg.GatewayTimeout*2)
 
-	if err := http.ListenAndServe(fmt.Sprintf(":%d", s.Port), nil); err != nil {
+	// New listener
+	var (
+		lerr error
+		l    net.Listener
+	)
+	if s.cfg.TLSConfig != nil {
+		l, lerr = tls.Listen("tcp", svr.Addr, s.cfg.TLSConfig)
+	} else {
+		l, lerr = net.Listen("tcp", svr.Addr)
+	}
+	if lerr != nil {
+		log.Fatal("create listener ERR:%s", lerr)
+	}
+
+	if err := svr.Serve(l); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func (s *Server) Stop() {
+	//TODO gracefull shutdown
+	close(s.stop)
+}
+
+func (s *Server) notifyAll(notify func(Notifiee)) {
+	var wg sync.WaitGroup
+
+	s.notifs.RLock()
+	wg.Add(len(s.notifs.m))
+	for f := range s.notifs.m {
+		go func(f Notifiee) {
+			defer wg.Done()
+			notify(f)
+		}(f)
+	}
+
+	wg.Wait()
+	s.notifs.RUnlock()
+}
+
+func (s *Server) Notify(f Notifiee) {
+	s.notifs.Lock()
+	s.notifs.m[f] = struct{}{}
+	s.notifs.Unlock()
+}
+
+func (s *Server) StopNotify(f Notifiee) {
+	s.notifs.Lock()
+	delete(s.notifs.m, f)
+	s.notifs.Unlock()
 }
 
 func garbageCollectBus(bus *types.Bus, interval time.Duration, expiry time.Duration) {
@@ -129,7 +205,7 @@ func proxyHandler(outgoingBus *types.RequestBus, bus *types.Bus, gatewayTimeout 
 	}
 }
 
-func serveWs(outgoingBus *types.RequestBus, bus *types.Bus, token string) func(w http.ResponseWriter, r *http.Request) {
+func (s *Server) serveWs(outgoingBus *types.RequestBus, bus *types.Bus) func(w http.ResponseWriter, r *http.Request) {
 
 	var upgrader = websocket.Upgrader{
 		ReadBufferSize:  1024,
@@ -137,7 +213,11 @@ func serveWs(outgoingBus *types.RequestBus, bus *types.Bus, token string) func(w
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		err := authorized(token, r)
+
+		guid := r.Header.Get(client.IDHeader)
+		subject := r.Header.Get(client.SubjectHeader)
+
+		err := authorized(s.cfg.Token, r)
 
 		if err != nil {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -153,6 +233,13 @@ func serveWs(outgoingBus *types.RequestBus, bus *types.Bus, token string) func(w
 		}
 
 		log.Printf("Connecting websocket on: %s", ws.RemoteAddr())
+
+		count.Add(1)
+		guids.Set(guid, time.Now())
+		// Connected
+		s.notifyAll(func(f Notifiee) {
+			f.Connected(guid, subject)
+		})
 
 		connectionDone := make(chan struct{})
 
@@ -202,6 +289,13 @@ func serveWs(outgoingBus *types.RequestBus, bus *types.Bus, token string) func(w
 		}()
 
 		<-connectionDone
+		count.Add(-1)
+		guids.Delete(guid)
+
+		// Disconnected
+		s.notifyAll(func(f Notifiee) {
+			f.Disconnected(guid)
+		})
 	}
 }
 

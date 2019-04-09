@@ -5,7 +5,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/alexellis/inlets/pkg/client"
+	"fhyx/inlets/pkg/client"
+
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 )
@@ -89,16 +90,14 @@ func runClient(cmd *cobra.Command, _ []string) error {
 		return errors.Wrap(err, "failed to get 'ping' value.")
 	}
 
-	inletsClient := client.Client{
+	cfg := &client.Configuration{
 		Remote:           remote,
 		UpstreamMap:      upstreamMap,
 		Token:            token,
 		PingWaitDuration: pingDuration,
 	}
+	inletsClient := client.New(cfg)
 
-	if err := inletsClient.Connect(); err != nil {
-		return err
-	}
-
+	inletsClient.Serve()
 	return nil
 }

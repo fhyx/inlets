@@ -1,6 +1,6 @@
-FROM golang:1.10 as build
+FROM golang:1.12 as build
 
-WORKDIR /go/src/github.com/alexellis/inlets
+WORKDIR /go/src/fhyx/inlets
 
 COPY .git               .git
 COPY vendor             vendor
