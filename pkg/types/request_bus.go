@@ -36,22 +36,10 @@ func (b *RequestBus) SubscriptionList() []string {
 	return keys
 }
 
-func (b *RequestBus) Send(res *http.Request) {
-	var ok bool
-
+func (b *RequestBus) Send(res *http.Request, id string) {
 	b.Mutex.RLock()
 	defer b.Mutex.RUnlock()
-
-	for _, id := range b.SubscriptionList() {
-		_, ok = b.Subscriptions[id]
-
-		if !ok {
-			continue
-		}
-
-		b.Subscriptions[id].Data <- res
-	}
-
+	b.Subscriptions[id].Data <- res
 }
 
 func (b *RequestBus) Subscribe(id string) *RequestSubscription {

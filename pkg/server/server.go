@@ -135,6 +135,8 @@ func proxyHandler(outgoingBus *types.RequestBus, bus *types.Bus, gatewayTimeout 
 
 	return func(w http.ResponseWriter, r *http.Request) {
 
+		id := r.Header.Get(client.IDHeader)
+
 		inletsID := uuid.Formatter(uuid.NewV4(), uuid.FormatHex)
 
 		sub := bus.Subscribe(inletsID)
@@ -196,8 +198,7 @@ func proxyHandler(outgoingBus *types.RequestBus, bus *types.Bus, gatewayTimeout 
 		}()
 
 		go func() {
-			outgoingBus.Send(req)
-			// outgoing <- req
+			outgoingBus.Send(req, id)
 			wg.Done()
 		}()
 
@@ -267,7 +268,7 @@ func (s *Server) serveWs(outgoingBus *types.RequestBus, bus *types.Bus) func(w h
 			}
 		}()
 
-		sub := outgoingBus.Subscribe(ws.LocalAddr().String())
+		sub := outgoingBus.Subscribe(guid)
 
 		go func() {
 			defer close(connectionDone)
