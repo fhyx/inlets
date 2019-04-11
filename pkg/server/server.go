@@ -22,6 +22,8 @@ import (
 	"github.com/twinj/uuid"
 )
 
+const VHostHeader = "x-client-vhost"
+
 var (
 	count = expvar.NewInt("count")
 	guids = expvar.NewMap("guids")
@@ -136,6 +138,7 @@ func proxyHandler(outgoingBus *types.RequestBus, bus *types.Bus, gatewayTimeout 
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		id := r.Header.Get(client.IDHeader)
+		vhost := r.Header.Get(VHostHeader)
 
 		inletsID := uuid.Formatter(uuid.NewV4(), uuid.FormatHex)
 
@@ -145,7 +148,7 @@ func proxyHandler(outgoingBus *types.RequestBus, bus *types.Bus, gatewayTimeout 
 			bus.Unsubscribe(inletsID)
 		}()
 
-		log.Printf("[%s] proxy %s %s %s", inletsID, r.Host, r.Method, r.URL.String())
+		log.Printf("[%s] proxy %s %s %s", inletsID, vhost, r.Method, r.URL.String())
 		r.Header.Set(transport.InletsHeader, inletsID)
 
 		if r.Body != nil {
@@ -159,7 +162,7 @@ func proxyHandler(outgoingBus *types.RequestBus, bus *types.Bus, gatewayTimeout 
 			qs = "?" + r.URL.RawQuery
 		}
 
-		req, _ := http.NewRequest(r.Method, fmt.Sprintf("http://%s%s%s", r.Host, r.URL.Path, qs),
+		req, _ := http.NewRequest(r.Method, fmt.Sprintf("http://%s%s%s", vhost, r.URL.Path, qs),
 			bytes.NewReader(body))
 
 		transport.CopyHeaders(req.Header, &r.Header)
